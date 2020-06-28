@@ -3,9 +3,13 @@ package lru
 import "container/list"
 
 type Cache struct {
+	//最大存储空间
 	maxBytes  int64
+	//当前存储大小
 	nbytes    int64
+	//循环链表
 	ll 		  *list.List
+	//字典中key对应链表的节点
 	cache 	  map[string]*list.Element
 	OnEvicted func(key string,value Value)
 }
@@ -41,6 +45,7 @@ func (c *Cache)RemoveOldest()  {
 	ele := c.ll.Back()
 	if ele!=nil{
 		c.ll.Remove(ele)
+		//将Value接口断言成entry数据类型获取存储的数据
 		kv := ele.Value.(*entry)
 		delete(c.cache,kv.key)
 		c.nbytes -= int64(len(kv.key)) + int64(kv.value.Len())
