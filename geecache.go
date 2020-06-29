@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"cache/signleflight"
 	"fmt"
 	"log"
 	"sync"
@@ -20,6 +21,10 @@ type Group struct {
 	name      string
 	getter    Getter
 	mainCache cache
+	//使用接口,不仅限于httppool,只要实现了get方法的类型就可注入到group
+	//多个group对应一个httppool,也可一对一，解耦性
+	peers     PeerPicker
+	loader	  *signleflight.Group
 }
 
 var (
@@ -38,6 +43,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		name:      name,
 		getter:    getter,
 		mainCache: cache{cacheBytes: cacheBytes},
+		loader:    &signleflight.Group{},
 	}
 	groups[name] = g
 	return g
@@ -51,22 +57,51 @@ func GetGroup(name string) *Group {
 	mu.RUnlock()
 	return g
 }
+//RegisterPeers() 方法，将 实现了 PeerPicker 接口的 HTTPPool 注入到 Group 中
+func (g *Group) RegisterPeers(peers PeerPicker) {
+	if g.peers != nil {
+		panic("RegisterPeerPicker called more than once")
+	}
+	g.peers = peers
+}
 
 func (g *Group) Get(key string) (ByteView, error) {
 	if key == "" {
 		return ByteView{}, fmt.Errorf("key is required")
 	}
-
 	if v, ok := g.mainCache.get(key); ok {
 		log.Println("[GeeCache] hit")
 		return v, nil
 	}
-
 	return g.load(key)
 }
 
 func (g *Group)load(key string) (value ByteView, err error) {
-	return g.getLocally(key)
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		if g.peers != nil {
+			if peer, ok := g.peers.PickPeer(key); ok {
+				if value, err = g.getFromPeer(peer, key); err == nil {
+					return value, nil
+				}
+				log.Println("[GeeCache] Failed to get from peer", err)
+			}
+		}
+
+		return g.getLocally(key)
+	})
+
+	if err == nil {
+		return viewi.(ByteView), nil
+	}
+	return
+}
+//实现了 PeerGetter 接口的 httpGetter 从访问远程节点，获取缓存值
+func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
+	bytes, err := peer.Get(g.name, key)
+	if err != nil {
+		return ByteView{}, err
+	}
+	return ByteView{b: bytes}, nil
 }
 
 func (g *Group)getLocally(key string) (ByteView, error) {
